@@ -11,7 +11,8 @@ import {
   Legend,
   Filler
 } from 'chart.js';
-import { X, Activity, Thermometer, Waves, Gauge, Lock, User, Clock, Command } from 'lucide-react';
+import { X, Activity, Thermometer, Waves, Gauge, Lock, User, Clock, Command, Layers, Zap, Wrench, Radio, AlertTriangle, Check } from 'lucide-react';
+import { FaultType } from '@/store/useDamStore';
 
 ChartJS.register(
   CategoryScale,
@@ -24,8 +25,15 @@ ChartJS.register(
   Filler
 );
 
+const faultTypeConfig: Record<FaultType, { label: string; icon: typeof Zap; color: string }> = {
+  overload: { label: '设备过载', icon: Zap, color: 'text-red-400' },
+  brake: { label: '制动异常', icon: Wrench, color: 'text-orange-400' },
+  limit: { label: '限位信号丢失', icon: Radio, color: 'text-yellow-400' },
+  communication: { label: '通信中断', icon: Radio, color: 'text-purple-400' }
+};
+
 export default function GateDetailPanel() {
-  const { selectedGateId, gates, setSelectedGateId, setGateOpening } = useDamStore();
+  const { selectedGateId, gates, setSelectedGateId, setGateOpening, dispatchBatches, acknowledgeFault } = useDamStore();
   const gate = gates.find(g => g.id === selectedGateId);
 
   if (!gate || !selectedGateId) return null;
@@ -104,6 +112,8 @@ export default function GateDetailPanel() {
 
   const loadPercent = (gate.load / gate.maxLoad) * 100;
 
+  const batch = dispatchBatches.find(b => b.id === gate.batchId);
+
   return (
     <div className="absolute top-4 right-4 z-10 bg-slate-900/95 backdrop-blur-sm rounded-xl text-white shadow-2xl border border-slate-700 w-80 max-h-[90vh] overflow-y-auto">
       <div className="sticky top-0 bg-slate-900/95 backdrop-blur-sm p-4 pb-3 border-b border-slate-700 flex items-center justify-between">
@@ -135,6 +145,9 @@ export default function GateDetailPanel() {
             <div className="text-2xl font-bold text-blue-400">
               {gate.opening.toFixed(1)}%
             </div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              目标: {gate.targetOpening.toFixed(0)}%
+            </div>
           </div>
 
           <div className="bg-slate-800/50 rounded-lg p-3">
@@ -145,6 +158,29 @@ export default function GateDetailPanel() {
             <div className="text-2xl font-bold text-orange-400">
               {gate.load.toFixed(1)}
               <span className="text-sm text-slate-500">/{gate.maxLoad}t</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-slate-800/50 rounded-lg p-3">
+            <div className="flex items-center gap-2 text-slate-400 text-xs mb-1">
+              <Waves className="w-3.5 h-3.5" />
+              <span>预计泄量</span>
+            </div>
+            <div className="text-xl font-bold text-cyan-400">
+              {gate.estimatedDischarge.toFixed(0)}
+              <span className="text-xs text-slate-500 ml-1">m³/s</span>
+            </div>
+          </div>
+
+          <div className="bg-slate-800/50 rounded-lg p-3">
+            <div className="flex items-center gap-2 text-slate-400 text-xs mb-1">
+              <Layers className="w-3.5 h-3.5" />
+              <span>所属批次</span>
+            </div>
+            <div className="text-sm font-medium text-white">
+              {batch ? batch.name : '独立运行'}
             </div>
           </div>
         </div>
@@ -215,6 +251,55 @@ export default function GateDetailPanel() {
             </span>
           </div>
         </div>
+
+        {gate.faults.length > 0 && (
+          <div className="bg-slate-800/50 rounded-lg p-3 space-y-2">
+            <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-400" />
+              故障记录 ({gate.faults.length})
+            </h3>
+            <div className="space-y-2">
+              {gate.faults.map((fault) => {
+                const config = faultTypeConfig[fault.type];
+                const Icon = config.icon;
+                return (
+                  <div
+                    key={fault.id}
+                    className={`p-2 rounded-lg border ${
+                      fault.acknowledged
+                        ? 'bg-slate-700/30 border-slate-600'
+                        : fault.severity === 'alarm'
+                          ? 'bg-red-500/10 border-red-500/30'
+                          : 'bg-yellow-500/10 border-yellow-500/30'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Icon className={`w-4 h-4 ${config.color}`} />
+                      <span className="text-sm font-medium">{config.label}</span>
+                      {fault.acknowledged ? (
+                        <span className="ml-auto px-1.5 py-0.5 bg-green-500/20 text-green-400 text-xs rounded flex items-center gap-0.5">
+                          <Check className="w-3 h-3" /> 已确认
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => acknowledgeFault(fault.id)}
+                          className="ml-auto px-1.5 py-0.5 bg-blue-500/20 text-blue-400 text-xs rounded hover:bg-blue-500/30 transition-colors"
+                        >
+                          确认
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400">{fault.description}</p>
+                    <div className="flex justify-between mt-1 text-xs text-slate-500">
+                      <span>班组: {fault.responsibleTeam}</span>
+                      <span>{fault.time}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="bg-slate-800/50 rounded-lg p-3 space-y-3">
           <h3 className="text-sm font-medium flex items-center gap-2">

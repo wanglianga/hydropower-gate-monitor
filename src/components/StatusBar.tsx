@@ -2,7 +2,7 @@ import { useDamStore } from '@/store/useDamStore';
 import { Waves, Droplets, Gauge, Activity, Zap } from 'lucide-react';
 
 export default function StatusBar() {
-  const { upstreamWaterLevel, downstreamWaterLevel, waterFlow, gates, operationMode } = useDamStore();
+  const { upstreamWaterLevel, downstreamWaterLevel, predictedDownstreamLevel, waterFlow, gates, operationMode } = useDamStore();
 
   const avgLoad = gates.reduce((sum, g) => sum + g.load, 0) / gates.length;
   const alarmGates = gates.filter(g => g.status === 'alarm').length;
@@ -41,6 +41,9 @@ export default function StatusBar() {
             <span className="text-slate-400">下游水位: </span>
             <span className="font-mono font-medium text-cyan-400">
               {downstreamWaterLevel.toFixed(1)}m
+            </span>
+            <span className="text-yellow-400 text-xs ml-1">
+              (预测 {predictedDownstreamLevel.toFixed(1)}m)
             </span>
           </div>
         </div>

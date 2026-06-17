@@ -1,6 +1,21 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { useDamStore, GateData, OperationMode } from '@/store/useDamStore';
+import { useDamStore, GateData, OperationMode, FaultInfo, FaultType } from '@/store/useDamStore';
+
+interface GateMeshData {
+  group: THREE.Group;
+  gateMesh: THREE.Mesh;
+  hoist: THREE.Group;
+  labelSprite: THREE.Sprite | null;
+  faultMarkers: Map<string, THREE.Group>;
+  batchColor: THREE.Color;
+}
+
+interface FocusPathData {
+  line: THREE.Line;
+  marker: THREE.Mesh;
+  points: THREE.Vector3[];
+}
 
 export class DamScene {
   private container: HTMLElement;
@@ -17,19 +32,32 @@ export class DamScene {
   private gatesGroup: THREE.Group;
   private waterUpstream: THREE.Mesh | null = null;
   private waterDownstream: THREE.Mesh | null = null;
+  private predictedWaterLevel: THREE.Mesh | null = null;
   private spillwayGroup: THREE.Group;
   private sensorMarkers: THREE.Mesh[] = [];
   private warningLine: THREE.Line | null = null;
   private waterParticles: THREE.Points | null = null;
+  private labelsGroup: THREE.Group;
+  private faultGroup: THREE.Group;
+  private focusPath: FocusPathData | null = null;
 
-  private gateMeshes: Map<string, { group: THREE.Group; gateMesh: THREE.Mesh; hoist: THREE.Group }> = new Map();
+  private gateMeshes: Map<string, GateMeshData> = new Map();
   private interactiveObjects: THREE.Object3D[] = [];
 
   private onGateClick: (gateId: string) => void;
+  private onFaultClick: (faultId: string) => void;
 
-  constructor(container: HTMLElement, onGateClick: (gateId: string) => void) {
+  private batchColors: Record<string, THREE.Color> = {
+    'batch-1': new THREE.Color(0x22c55e),
+    'batch-2': new THREE.Color(0x3b82f6),
+    'batch-3': new THREE.Color(0xf59e0b),
+  };
+  private defaultBatchColor = new THREE.Color(0x6b7280);
+
+  constructor(container: HTMLElement, onGateClick: (gateId: string) => void, onFaultClick: (faultId: string) => void) {
     this.container = container;
     this.onGateClick = onGateClick;
+    this.onFaultClick = onFaultClick;
     this.clock = new THREE.Clock();
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
@@ -67,10 +95,14 @@ export class DamScene {
     this.damGroup = new THREE.Group();
     this.gatesGroup = new THREE.Group();
     this.spillwayGroup = new THREE.Group();
+    this.labelsGroup = new THREE.Group();
+    this.faultGroup = new THREE.Group();
 
     this.scene.add(this.damGroup);
     this.scene.add(this.gatesGroup);
     this.scene.add(this.spillwayGroup);
+    this.scene.add(this.labelsGroup);
+    this.scene.add(this.faultGroup);
 
     this.setupLights();
     this.createDam();
@@ -190,9 +222,59 @@ export class DamScene {
       this.damGroup.add(rail);
     }
 
+    this.createMachineRoom();
     this.createWaterLevelGauge();
     this.createMaintenancePlatform();
     this.createSensors();
+  }
+
+  private createMachineRoom(): void {
+    const roomGroup = new THREE.Group();
+    roomGroup.position.set(0, 78, 8);
+
+    const roomMaterial = new THREE.MeshStandardMaterial({
+      color: 0x5a5a6a,
+      roughness: 0.7
+    });
+
+    const roomBody = new THREE.Mesh(
+      new THREE.BoxGeometry(90, 12, 18),
+      roomMaterial
+    );
+    roomBody.position.y = 6;
+    roomBody.castShadow = true;
+    roomBody.receiveShadow = true;
+    roomGroup.add(roomBody);
+
+    const roofMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a4a5a,
+      roughness: 0.6
+    });
+    const roof = new THREE.Mesh(
+      new THREE.BoxGeometry(95, 2, 22),
+      roofMaterial
+    );
+    roof.position.y = 13;
+    roof.castShadow = true;
+    roomGroup.add(roof);
+
+    for (let i = -2; i <= 2; i++) {
+      const windowMaterial = new THREE.MeshStandardMaterial({
+        color: 0x87ceeb,
+        emissive: 0x4488aa,
+        emissiveIntensity: 0.2,
+        transparent: true,
+        opacity: 0.7
+      });
+      const win = new THREE.Mesh(
+        new THREE.BoxGeometry(8, 4, 0.5),
+        windowMaterial
+      );
+      win.position.set(i * 18, 7, 9.2);
+      roomGroup.add(win);
+    }
+
+    this.damGroup.add(roomGroup);
   }
 
   private createWaterLevelGauge(): void {
@@ -291,6 +373,82 @@ export class DamScene {
     });
   }
 
+  private createTextTexture(text: string, bgColor: string, textColor: string = '#ffffff', fontSize: number = 24): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d')!;
+    const padding = 12;
+    const lineHeight = fontSize * 1.2;
+
+    ctx.font = `bold ${fontSize}px Arial, sans-serif`;
+    const lines = text.split('\n');
+    const maxWidth = Math.max(...lines.map(l => ctx.measureText(l).width));
+    canvas.width = maxWidth + padding * 2;
+    canvas.height = lines.length * lineHeight + padding * 2;
+
+    ctx.fillStyle = bgColor;
+    ctx.beginPath();
+    ctx.roundRect(0, 0, canvas.width, canvas.height, 8);
+    ctx.fill();
+
+    ctx.fillStyle = textColor;
+    ctx.font = `bold ${fontSize}px Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    lines.forEach((line, i) => {
+      ctx.fillText(line, canvas.width / 2, padding + lineHeight / 2 + i * lineHeight);
+    });
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    return texture;
+  }
+
+  private createGateLabel(gate: GateData, batchColor: THREE.Color): THREE.Sprite {
+    const bgColor = `rgba(${Math.floor(batchColor.r * 255)}, ${Math.floor(batchColor.g * 255)}, ${Math.floor(batchColor.b * 255)}, 0.9)`;
+    const text = `${gate.name}\n开度: ${gate.opening.toFixed(1)}%\n泄量: ${gate.estimatedDischarge.toFixed(0)} m³/s`;
+    const texture = this.createTextTexture(text, bgColor);
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false
+    });
+
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(8, 4, 1);
+    sprite.position.set(gate.position.x, 90, 0);
+    sprite.userData = { gateId: gate.id, isLabel: true };
+
+    return sprite;
+  }
+
+  private updateGateLabel(gateId: string, gate: GateData): void {
+    const gateData = this.gateMeshes.get(gateId);
+    if (!gateData || !gateData.labelSprite) return;
+
+    const batchColor = gate.batchId ? (this.batchColors[gate.batchId] || this.defaultBatchColor) : this.defaultBatchColor;
+    const bgColor = `rgba(${Math.floor(batchColor.r * 255)}, ${Math.floor(batchColor.g * 255)}, ${Math.floor(batchColor.b * 255)}, 0.9)`;
+    const statusIcon = gate.status === 'alarm' ? '🔴' : gate.status === 'warning' ? '🟡' : '🟢';
+    const batchText = gate.batchId ? `批次: ${this.getBatchName(gate.batchId)}\n` : '';
+    const text = `${statusIcon} ${gate.name}\n${batchText}开度: ${gate.opening.toFixed(1)}% → ${gate.targetOpening.toFixed(0)}%\n泄量: ${gate.estimatedDischarge.toFixed(0)} m³/s`;
+
+    const texture = this.createTextTexture(text, bgColor);
+    const material = gateData.labelSprite.material as THREE.SpriteMaterial;
+    if (material.map) {
+      material.map.dispose();
+    }
+    material.map = texture;
+    material.needsUpdate = true;
+  }
+
+  private getBatchName(batchId: string): string {
+    const state = useDamStore.getState();
+    const batch = state.dispatchBatches.find(b => b.id === batchId);
+    return batch ? batch.name.split('（')[0] : '';
+  }
+
   private createGates(): void {
     const state = useDamStore.getState();
 
@@ -298,6 +456,8 @@ export class DamScene {
       const gateGroup = new THREE.Group();
       gateGroup.position.set(gate.position.x, 0, 0);
       gateGroup.userData = { gateId: gate.id };
+
+      const batchColor = gate.batchId ? (this.batchColors[gate.batchId] || this.defaultBatchColor) : this.defaultBatchColor;
 
       const gateMaterial = new THREE.MeshStandardMaterial({
         color: 0x4a90d9,
@@ -371,10 +531,28 @@ export class DamScene {
       statusLight.name = 'statusLight';
       gateGroup.add(statusLight);
 
+      const batchIndicator = new THREE.Mesh(
+        new THREE.BoxGeometry(12, 0.8, 2.5),
+        new THREE.MeshStandardMaterial({
+          color: batchColor,
+          emissive: batchColor,
+          emissiveIntensity: 0.3
+        })
+      );
+      batchIndicator.position.set(0, 10, 0);
+      batchIndicator.name = 'batchIndicator';
+      gateGroup.add(batchIndicator);
+
+      const labelSprite = this.createGateLabel(gate, batchColor);
+      this.labelsGroup.add(labelSprite);
+
       this.gateMeshes.set(gate.id, {
         group: gateGroup,
         gateMesh: gateMesh,
-        hoist: hoistGroup
+        hoist: hoistGroup,
+        labelSprite: labelSprite,
+        faultMarkers: new Map(),
+        batchColor: batchColor
       });
 
       this.interactiveObjects.push(gateMesh);
@@ -412,6 +590,7 @@ export class DamScene {
     motor.rotation.z = Math.PI / 2;
     motor.position.set(0, 3, 0);
     motor.castShadow = true;
+    motor.name = 'motor';
     hoistGroup.add(motor);
 
     const drum = new THREE.Mesh(
@@ -420,6 +599,7 @@ export class DamScene {
     );
     drum.rotation.z = Math.PI / 2;
     drum.position.set(0, 1, 2);
+    drum.name = 'drum';
     hoistGroup.add(drum);
 
     const gearBox = new THREE.Mesh(
@@ -431,6 +611,136 @@ export class DamScene {
     hoistGroup.add(gearBox);
 
     return hoistGroup;
+  }
+
+  private createFaultMarker(fault: FaultInfo, gatePosition: { x: number; z: number }): THREE.Group {
+    const faultGroup = new THREE.Group();
+    faultGroup.userData = { faultId: fault.id, isFault: true, gateId: fault.gateId };
+
+    const faultTypeColors: Record<FaultType, number> = {
+      overload: 0xff4444,
+      brake: 0xff8800,
+      limit: 0xffcc00,
+      communication: 0x8844ff
+    };
+
+    const color = faultTypeColors[fault.type] || 0xff0000;
+    const intensity = fault.severity === 'alarm' ? 1 : 0.5;
+
+    const markerGeometry = new THREE.ConeGeometry(1.2, 3, 8);
+    const markerMaterial = new THREE.MeshStandardMaterial({
+      color: color,
+      emissive: color,
+      emissiveIntensity: intensity,
+      transparent: true,
+      opacity: 0.9
+    });
+
+    const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+    marker.rotation.x = Math.PI;
+    marker.position.set(0, 85, 0);
+    marker.name = 'faultMarker';
+    faultGroup.add(marker);
+
+    const ringGeometry = new THREE.RingGeometry(1.5, 2, 32);
+    const ringMaterial = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 0.6,
+      side: THREE.DoubleSide
+    });
+    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(0, 83, 0);
+    ring.name = 'faultRing';
+    faultGroup.add(ring);
+
+    const bgColor = fault.severity === 'alarm' ? 'rgba(220, 38, 38, 0.95)' : 'rgba(245, 158, 11, 0.95)';
+    const faultTypeLabels: Record<FaultType, string> = {
+      overload: '过载',
+      brake: '制动异常',
+      limit: '限位丢失',
+      communication: '通信中断'
+    };
+    const labelText = `⚠️ ${faultTypeLabels[fault.type]}\n${fault.description}`;
+    const texture = this.createTextTexture(labelText, bgColor, '#ffffff', 18);
+
+    const labelMaterial = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false
+    });
+    const label = new THREE.Sprite(labelMaterial);
+    label.scale.set(7, 3, 1);
+    label.position.set(0, 92, 0);
+    faultGroup.add(label);
+
+    faultGroup.position.set(gatePosition.x, 0, gatePosition.z);
+    faultGroup.name = `fault-${fault.id}`;
+
+    return faultGroup;
+  }
+
+  private createFocusPath(fault: FaultInfo, gatePosition: { x: number; z: number }): void {
+    if (this.focusPath) {
+      this.scene.remove(this.focusPath.line);
+      this.scene.remove(this.focusPath.marker);
+    }
+
+    const points: THREE.Vector3[] = [
+      new THREE.Vector3(gatePosition.x, 78, 8),
+      new THREE.Vector3(gatePosition.x, 75, 2),
+      new THREE.Vector3(gatePosition.x, 40, 0),
+      new THREE.Vector3(gatePosition.x, 15, 0),
+    ];
+
+    const curve = new THREE.CatmullRomCurve3(points);
+    const curvePoints = curve.getPoints(50);
+    const geometry = new THREE.BufferGeometry().setFromPoints(curvePoints);
+
+    const material = new THREE.LineBasicMaterial({
+      color: 0xff6600,
+      transparent: true,
+      opacity: 0.8,
+      linewidth: 3
+    });
+
+    const line = new THREE.Line(geometry, material);
+    this.scene.add(line);
+
+    const markerGeometry = new THREE.SphereGeometry(1.5, 16, 16);
+    const markerMaterial = new THREE.MeshStandardMaterial({
+      color: 0xff6600,
+      emissive: 0xff3300,
+      emissiveIntensity: 1,
+      transparent: true,
+      opacity: 0.9
+    });
+    const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+    this.scene.add(marker);
+
+    this.focusPath = { line, marker, points: curvePoints };
+  }
+
+  private updateFocusPath(progress: number): void {
+    if (!this.focusPath || !this.focusPath.points.length) return;
+
+    const totalPoints = this.focusPath.points.length;
+    const index = Math.min(Math.floor(progress * totalPoints), totalPoints - 1);
+    const point = this.focusPath.points[index];
+    this.focusPath.marker.position.copy(point);
+
+    const pulse = 0.8 + Math.sin(Date.now() * 0.01) * 0.2;
+    const material = this.focusPath.marker.material as THREE.MeshStandardMaterial;
+    material.emissiveIntensity = pulse;
+  }
+
+  private clearFocusPath(): void {
+    if (this.focusPath) {
+      this.scene.remove(this.focusPath.line);
+      this.scene.remove(this.focusPath.marker);
+      this.focusPath = null;
+    }
   }
 
   private createWater(): void {
@@ -467,6 +777,36 @@ export class DamScene {
     downstreamWater.receiveShadow = true;
     this.waterDownstream = downstreamWater;
     this.scene.add(this.waterDownstream);
+
+    const predictedGeometry = new THREE.PlaneGeometry(400, 300, 1, 1);
+    const predictedMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffff00,
+      transparent: true,
+      opacity: 0.2,
+      side: THREE.DoubleSide,
+      wireframe: true
+    });
+    this.predictedWaterLevel = new THREE.Mesh(predictedGeometry, predictedMaterial);
+    this.predictedWaterLevel.rotation.x = -Math.PI / 2;
+    this.predictedWaterLevel.position.set(0, 28, 180);
+    this.scene.add(this.predictedWaterLevel);
+
+    const predictedLinePoints = [];
+    for (let i = 0; i <= 20; i++) {
+      predictedLinePoints.push(new THREE.Vector3(-80 + i * 8, 28, 100));
+    }
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints(predictedLinePoints);
+    const lineMaterial = new THREE.LineDashedMaterial({
+      color: 0xffff00,
+      dashSize: 3,
+      gapSize: 2,
+      transparent: true,
+      opacity: 0.7
+    });
+    const predictedLine = new THREE.Line(lineGeometry, lineMaterial);
+    predictedLine.computeLineDistances();
+    predictedLine.name = 'predictedWaterLine';
+    this.scene.add(predictedLine);
   }
 
   private createSpillway(): void {
@@ -582,8 +922,27 @@ export class DamScene {
     this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
-    const intersects = this.raycaster.intersectObjects(this.interactiveObjects, true);
 
+    const faultObjects: THREE.Object3D[] = [];
+    this.gateMeshes.forEach((data) => {
+      data.faultMarkers.forEach((marker) => {
+        faultObjects.push(marker);
+      });
+    });
+
+    const faultIntersects = this.raycaster.intersectObjects(faultObjects, true);
+    if (faultIntersects.length > 0) {
+      let object: THREE.Object3D | null = faultIntersects[0].object;
+      while (object && !object.userData.faultId) {
+        object = object.parent;
+      }
+      if (object && object.userData.faultId) {
+        this.onFaultClick(object.userData.faultId);
+        return;
+      }
+    }
+
+    const intersects = this.raycaster.intersectObjects(this.interactiveObjects, true);
     if (intersects.length > 0) {
       let object: THREE.Object3D | null = intersects[0].object;
       while (object && !object.userData.gateId) {
@@ -603,7 +962,15 @@ export class DamScene {
     this.raycaster.setFromCamera(this.mouse, this.camera);
     const intersects = this.raycaster.intersectObjects(this.interactiveObjects, true);
 
-    document.body.style.cursor = intersects.length > 0 ? 'pointer' : 'default';
+    const faultObjects: THREE.Object3D[] = [];
+    this.gateMeshes.forEach((data) => {
+      data.faultMarkers.forEach((marker) => {
+        faultObjects.push(marker);
+      });
+    });
+    const faultIntersects = this.raycaster.intersectObjects(faultObjects, true);
+
+    document.body.style.cursor = (intersects.length > 0 || faultIntersects.length > 0) ? 'pointer' : 'default';
   };
 
   public update(): void {
@@ -631,6 +998,23 @@ export class DamScene {
           material.color.setHex(color);
           material.emissive.setHex(color);
         }
+
+        const batchIndicator = gateData.group.children.find(c => c.name === 'batchIndicator');
+        if (batchIndicator) {
+          const batchColor = gate.batchId ? (this.batchColors[gate.batchId] || this.defaultBatchColor) : this.defaultBatchColor;
+          const material = (batchIndicator as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          material.color.copy(batchColor);
+          material.emissive.copy(batchColor);
+        }
+
+        if (state.showLabels && gateData.labelSprite) {
+          gateData.labelSprite.visible = true;
+          this.updateGateLabel(gate.id, gate);
+        } else if (gateData.labelSprite) {
+          gateData.labelSprite.visible = false;
+        }
+
+        this.updateFaultMarkers(gate);
       }
     });
 
@@ -646,6 +1030,20 @@ export class DamScene {
       this.animateWater(this.waterDownstream, 0.2);
     }
 
+    const predictedY = state.predictedDownstreamLevel * 0.7;
+    if (this.predictedWaterLevel) {
+      this.predictedWaterLevel.position.y = predictedY;
+    }
+    const predictedLine = this.scene.getObjectByName('predictedWaterLine');
+    if (predictedLine) {
+      const positions = (predictedLine as THREE.Line).geometry.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < positions.count; i++) {
+        positions.setY(i, predictedY);
+      }
+      positions.needsUpdate = true;
+      (predictedLine as THREE.Line).computeLineDistances();
+    }
+
     const float = this.damGroup.getObjectByName('waterLevelFloat');
     if (float) {
       float.position.y = upstreamY;
@@ -654,6 +1052,39 @@ export class DamScene {
     this.updateWaterParticles();
     this.updateSensorLights();
     this.updateWarningLine();
+
+    if (state.isFocusAnimating && this.focusPath) {
+      this.updateFocusPath(state.focusPathProgress);
+    }
+  }
+
+  private updateFaultMarkers(gate: GateData): void {
+    const gateData = this.gateMeshes.get(gate.id);
+    if (!gateData) return;
+
+    const currentFaultIds = new Set(gate.faults.map(f => f.id));
+
+    gateData.faultMarkers.forEach((marker, faultId) => {
+      if (!currentFaultIds.has(faultId)) {
+        this.faultGroup.remove(marker);
+        gateData.faultMarkers.delete(faultId);
+      }
+    });
+
+    gate.faults.forEach((fault) => {
+      if (!gateData.faultMarkers.has(fault.id)) {
+        const marker = this.createFaultMarker(fault, gate.position);
+        gateData.faultMarkers.set(fault.id, marker);
+        this.faultGroup.add(marker);
+      } else {
+        const marker = gateData.faultMarkers.get(fault.id)!;
+        const ring = marker.children.find(c => c.name === 'faultRing');
+        if (ring) {
+          const scale = 1 + Math.sin(Date.now() * 0.003 + fault.id.charCodeAt(0)) * 0.3;
+          ring.scale.set(scale, scale, 1);
+        }
+      }
+    });
   }
 
   private animateWater(water: THREE.Mesh, amplitude: number): void {
@@ -738,6 +1169,29 @@ export class DamScene {
       positions.needsUpdate = true;
       this.warningLine.computeLineDistances();
     }
+  }
+
+  public focusOnFault(faultId: string): void {
+    const state = useDamStore.getState();
+    let targetFault: FaultInfo | null = null;
+    let targetGate: GateData | null = null;
+
+    for (const gate of state.gates) {
+      const fault = gate.faults.find(f => f.id === faultId);
+      if (fault) {
+        targetFault = fault;
+        targetGate = gate;
+        break;
+      }
+    }
+
+    if (targetFault && targetGate) {
+      this.createFocusPath(targetFault, targetGate.position);
+    }
+  }
+
+  public clearFaultFocus(): void {
+    this.clearFocusPath();
   }
 
   public animate = (): void => {

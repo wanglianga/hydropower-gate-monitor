@@ -1,6 +1,45 @@
 import { create } from 'zustand';
 
 export type OperationMode = 'normal' | 'maintenance' | 'flood' | 'emergency';
+export type FaultType = 'overload' | 'brake' | 'limit' | 'communication';
+export type InterlockCheckResult = 'pass' | 'fail' | 'pending';
+export type DispatchBatchStatus = 'waiting' | 'executing' | 'completed';
+
+export interface DispatchBatch {
+  id: string;
+  name: string;
+  gateIds: string[];
+  targetOpening: number;
+  status: DispatchBatchStatus;
+  scheduledTime: string;
+  estimatedDischarge: number;
+  operator: string;
+}
+
+export interface InterlockCheck {
+  id: string;
+  name: string;
+  result: InterlockCheckResult;
+  description: string;
+  gateId?: string;
+}
+
+export interface FaultInfo {
+  id: string;
+  gateId: string;
+  type: FaultType;
+  description: string;
+  severity: 'warning' | 'alarm';
+  location: {
+    damTop: { x: number; y: number; z: number };
+    machineRoom: { x: number; y: number; z: number };
+    gateHole: { x: number; y: number; z: number };
+  };
+  responsibleTeam: string;
+  estimatedRepairTime: string;
+  time: string;
+  acknowledged: boolean;
+}
 
 export interface GateData {
   id: string;
@@ -23,6 +62,9 @@ export interface GateData {
     temperature: number;
     waterPressure: number;
   };
+  estimatedDischarge: number;
+  batchId?: string;
+  faults: FaultInfo[];
 }
 
 export interface AlarmItem {
@@ -32,6 +74,7 @@ export interface AlarmItem {
   time: string;
   gateId?: string;
   location: string;
+  faultId?: string;
 }
 
 interface DamState {
@@ -41,9 +84,16 @@ interface DamState {
   selectedGateId: string | null;
   upstreamWaterLevel: number;
   downstreamWaterLevel: number;
+  predictedDownstreamLevel: number;
   waterFlow: number;
   showLabels: boolean;
   animationSpeed: number;
+  dispatchBatches: DispatchBatch[];
+  interlockChecks: InterlockCheck[];
+  lastInterlockCheckTime: string;
+  focusedFaultId: string | null;
+  focusPathProgress: number;
+  isFocusAnimating: boolean;
 
   setOperationMode: (mode: OperationMode) => void;
   setSelectedGateId: (id: string | null) => void;
@@ -54,6 +104,18 @@ interface DamState {
   setAnimationSpeed: (speed: number) => void;
   updateGateData: (gateId: string, data: Partial<GateData>) => void;
   tick: (deltaTime: number) => void;
+
+  createDispatchBatch: (batch: Omit<DispatchBatch, 'id' | 'status' | 'estimatedDischarge'>) => void;
+  startBatch: (batchId: string) => void;
+  executeInterlockCheck: () => void;
+  addFault: (gateId: string, fault: Omit<FaultInfo, 'id' | 'time' | 'acknowledged' | 'gateId'>) => void;
+  acknowledgeFault: (faultId: string) => void;
+  clearFault: (faultId: string) => void;
+  setFocusedFaultId: (faultId: string | null) => void;
+  triggerFocusAnimation: (faultId: string) => void;
+  calculateEstimatedDischarge: (gateId: string, opening: number) => number;
+  calculateTotalEstimatedDischarge: () => number;
+  calculatePredictedDownstreamLevel: () => number;
 }
 
 const generateInitialGates = (): GateData[] => {
@@ -95,13 +157,57 @@ const generateInitialGates = (): GateData[] => {
         vibration: 0.12 + i * 0.03,
         temperature: 28 + i * 1.5,
         waterPressure: 0.85 + i * 0.05
-      }
+      },
+      estimatedDischarge: 200 + baseOpening * 15,
+      faults: []
     });
   }
   return gates;
 };
 
 const initialGates = generateInitialGates();
+
+const initialBatches: DispatchBatch[] = [
+  {
+    id: 'batch-1',
+    name: '第一批（1、3号闸）',
+    gateIds: ['gate-1', 'gate-3'],
+    targetOpening: 60,
+    status: 'completed',
+    scheduledTime: '2026-06-15 08:00',
+    estimatedDischarge: 1800,
+    operator: '李调度'
+  },
+  {
+    id: 'batch-2',
+    name: '第二批（2、5号闸）',
+    gateIds: ['gate-2', 'gate-5'],
+    targetOpening: 45,
+    status: 'executing',
+    scheduledTime: '2026-06-15 09:30',
+    estimatedDischarge: 1350,
+    operator: '李调度'
+  },
+  {
+    id: 'batch-3',
+    name: '第三批（4号闸）',
+    gateIds: ['gate-4'],
+    targetOpening: 30,
+    status: 'waiting',
+    scheduledTime: '2026-06-15 11:00',
+    estimatedDischarge: 450,
+    operator: '王调度'
+  }
+];
+
+const initialInterlockChecks: InterlockCheck[] = [
+  { id: 'il-1', name: '电源联锁', result: 'pass', description: '主备电源正常' },
+  { id: 'il-2', name: '水位联锁', result: 'pass', description: '上下游水位在安全范围' },
+  { id: 'il-3', name: '开度差联锁', result: 'pass', description: '相邻闸门开度差小于20%' },
+  { id: 'il-4', name: '负载联锁', result: 'pending', description: '检查中...' },
+  { id: 'il-5', name: '通信联锁', result: 'pass', description: '所有设备通信正常' },
+  { id: 'il-6', name: '安全门联锁', result: 'pass', description: '检修通道已关闭' }
+];
 
 export const useDamStore = create<DamState>((set, get) => ({
   operationMode: 'normal',
@@ -126,9 +232,16 @@ export const useDamStore = create<DamState>((set, get) => ({
   selectedGateId: null,
   upstreamWaterLevel: 85,
   downstreamWaterLevel: 35,
+  predictedDownstreamLevel: 42,
   waterFlow: 1200,
   showLabels: true,
   animationSpeed: 1,
+  dispatchBatches: initialBatches,
+  interlockChecks: initialInterlockChecks,
+  lastInterlockCheckTime: '2026-06-15 09:00',
+  focusedFaultId: null,
+  focusPathProgress: 0,
+  isFocusAnimating: false,
 
   setOperationMode: (mode) => {
     set({ operationMode: mode });
@@ -155,9 +268,10 @@ export const useDamStore = create<DamState>((set, get) => ({
   setSelectedGateId: (id) => set({ selectedGateId: id }),
 
   setGateOpening: (gateId, opening) => {
+    const discharge = get().calculateEstimatedDischarge(gateId, opening);
     set(state => ({
       gates: state.gates.map(g =>
-        g.id === gateId ? { ...g, targetOpening: Math.max(0, Math.min(100, opening)) } : g
+        g.id === gateId ? { ...g, targetOpening: Math.max(0, Math.min(100, opening)), estimatedDischarge: discharge } : g
       )
     }));
   },
@@ -203,15 +317,26 @@ export const useDamStore = create<DamState>((set, get) => ({
       const loadBase = 30 + newOpening * 0.8;
       const newLoad = loadBase + Math.sin(Date.now() * 0.001 + gate.position.x) * 5;
 
-      const newStatus: 'normal' | 'warning' | 'alarm' =
-        newLoad > gate.maxLoad * 0.9 ? 'alarm' :
-        newLoad > gate.maxLoad * 0.75 ? 'warning' : 'normal';
+      const hasSeriousFault = gate.faults.some(f => f.severity === 'alarm' && !f.acknowledged);
+      const hasWarningFault = gate.faults.some(f => f.severity === 'warning' && !f.acknowledged);
+
+      let newStatus: 'normal' | 'warning' | 'alarm';
+      if (hasSeriousFault || newLoad > gate.maxLoad * 0.9) {
+        newStatus = 'alarm';
+      } else if (hasWarningFault || newLoad > gate.maxLoad * 0.75) {
+        newStatus = 'warning';
+      } else {
+        newStatus = 'normal';
+      }
+
+      const newDischarge = get().calculateEstimatedDischarge(gate.id, newOpening);
 
       return {
         ...gate,
         opening: newOpening,
         load: Math.min(gate.maxLoad, newLoad),
         status: newStatus,
+        estimatedDischarge: newDischarge,
         sensorData: {
           vibration: 0.1 + newOpening * 0.005 + Math.sin(Date.now() * 0.003) * 0.02,
           temperature: gate.sensorData.temperature + Math.sin(Date.now() * 0.0005) * 0.1,
@@ -228,11 +353,173 @@ export const useDamStore = create<DamState>((set, get) => ({
     const downstreamLevel = 30 + avgOpening * 0.4 + Math.sin(Date.now() * 0.0007) * 0.5;
     const waterFlow = 800 + avgOpening * 20;
 
+    let focusProgress = state.focusPathProgress;
+    if (state.isFocusAnimating) {
+      focusProgress += deltaTime * 0.5;
+      if (focusProgress >= 1) {
+        focusProgress = 0;
+        set({ isFocusAnimating: false, focusPathProgress: 0 });
+      }
+    }
+
+    const predictedLevel = get().calculatePredictedDownstreamLevel();
+
     set({
       gates: newGates,
       upstreamWaterLevel: Math.min(100, upstreamLevel),
       downstreamWaterLevel: Math.min(60, downstreamLevel),
-      waterFlow
+      predictedDownstreamLevel: predictedLevel,
+      waterFlow,
+      focusPathProgress: focusProgress
     });
+  },
+
+  createDispatchBatch: (batch) => {
+    const estimatedDischarge = batch.gateIds.reduce((sum, gateId) => {
+      return sum + get().calculateEstimatedDischarge(gateId, batch.targetOpening);
+    }, 0);
+
+    const newBatch: DispatchBatch = {
+      ...batch,
+      id: `batch-${Date.now()}`,
+      status: 'waiting',
+      estimatedDischarge
+    };
+
+    set(state => ({
+      dispatchBatches: [...state.dispatchBatches, newBatch]
+    }));
+  },
+
+  startBatch: (batchId) => {
+    const state = get();
+    const batch = state.dispatchBatches.find(b => b.id === batchId);
+    if (!batch) return;
+
+    batch.gateIds.forEach(gateId => {
+      get().updateGateData(gateId, {
+        targetOpening: batch.targetOpening,
+        batchId: batch.id
+      });
+    });
+
+    set(state => ({
+      dispatchBatches: state.dispatchBatches.map(b =>
+        b.id === batchId ? { ...b, status: 'executing' as const } : b
+      )
+    }));
+
+    get().addAlarm({
+      type: 'warning',
+      message: `${batch.name} 开始执行`,
+      location: '调度中心'
+    });
+  },
+
+  executeInterlockCheck: () => {
+    const state = get();
+    const checks: InterlockCheck[] = state.interlockChecks.map(check => {
+      const passes = Math.random() > 0.15;
+      return {
+        ...check,
+        result: passes ? 'pass' : 'fail'
+      };
+    });
+
+    set({
+      interlockChecks: checks,
+      lastInterlockCheckTime: new Date().toLocaleString('zh-CN')
+    });
+
+    const failedChecks = checks.filter(c => c.result === 'fail');
+    if (failedChecks.length > 0) {
+      get().addAlarm({
+        type: 'warning',
+        message: `联锁检查发现 ${failedChecks.length} 项异常`,
+        location: '安全系统'
+      });
+    }
+  },
+
+  addFault: (gateId, fault) => {
+    const gate = get().gates.find(g => g.id === gateId);
+    if (!gate) return;
+
+    const newFault: FaultInfo = {
+      ...fault,
+      id: `fault-${Date.now()}`,
+      gateId,
+      time: new Date().toLocaleString('zh-CN'),
+      acknowledged: false
+    };
+
+    set(state => ({
+      gates: state.gates.map(g =>
+        g.id === gateId ? { ...g, faults: [...g.faults, newFault] } : g
+      )
+    }));
+
+    const faultTypeLabels: Record<FaultType, string> = {
+      overload: '设备过载',
+      brake: '制动异常',
+      limit: '限位信号丢失',
+      communication: '通信中断'
+    };
+
+    get().addAlarm({
+      type: fault.severity,
+      message: `${gate.name} ${faultTypeLabels[fault.type]}：${fault.description}`,
+      location: fault.responsibleTeam,
+      gateId,
+      faultId: newFault.id
+    });
+  },
+
+  acknowledgeFault: (faultId) => {
+    set(state => ({
+      gates: state.gates.map(g => ({
+        ...g,
+        faults: g.faults.map(f =>
+          f.id === faultId ? { ...f, acknowledged: true } : f
+        )
+      }))
+    }));
+  },
+
+  clearFault: (faultId) => {
+    set(state => ({
+      gates: state.gates.map(g => ({
+        ...g,
+        faults: g.faults.filter(f => f.id !== faultId)
+      })),
+      focusedFaultId: state.focusedFaultId === faultId ? null : state.focusedFaultId
+    }));
+  },
+
+  setFocusedFaultId: (faultId) => set({ focusedFaultId: faultId }),
+
+  triggerFocusAnimation: (faultId) => {
+    set({ focusedFaultId: faultId, isFocusAnimating: true, focusPathProgress: 0 });
+  },
+
+  calculateEstimatedDischarge: (gateId, opening) => {
+    const gate = get().gates.find(g => g.id === gateId);
+    if (!gate) return 0;
+    const baseFlow = 50;
+    const flowCoefficient = 12;
+    return baseFlow + opening * flowCoefficient;
+  },
+
+  calculateTotalEstimatedDischarge: () => {
+    const state = get();
+    return state.gates.reduce((sum, g) => sum + g.estimatedDischarge, 0);
+  },
+
+  calculatePredictedDownstreamLevel: () => {
+    const state = get();
+    const totalDischarge = get().calculateTotalEstimatedDischarge();
+    const baseLevel = 30;
+    const levelPerDischarge = 0.008;
+    return Math.min(60, baseLevel + totalDischarge * levelPerDischarge);
   }
 }));
