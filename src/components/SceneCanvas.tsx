@@ -1,6 +1,5 @@
 import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { DamScene } from '@/scene/DamScene';
-import { useDamStore } from '@/store/useDamStore';
 
 interface SceneCanvasProps {
   onGateClick: (gateId: string) => void;

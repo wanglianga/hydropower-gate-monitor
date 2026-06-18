@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useDamStore, FaultType, FaultInfo } from '@/store/useDamStore';
-import { AlertTriangle, AlertCircle, MapPin, Users, Clock, Wrench, Radio, Zap, Target, Check, X, ChevronDown, ChevronUp, Building2, Warehouse, CircleDot } from 'lucide-react';
+import { AlertTriangle, MapPin, Users, Clock, Wrench, Radio, Zap, Target, Check, X, ChevronDown, ChevronUp, Building2, Warehouse, CircleDot } from 'lucide-react';
 import { SceneCanvasRef } from './SceneCanvas';
 
 interface FaultPanelProps {
@@ -15,7 +15,7 @@ const faultTypeConfig: Record<FaultType, { label: string; icon: typeof Zap; colo
 };
 
 export default function FaultPanel({ sceneRef }: FaultPanelProps) {
-  const { gates, acknowledgeFault, clearFault, triggerFocusAnimation, focusedFaultId, setFocusedFaultId, addFault } = useDamStore();
+  const { gates, acknowledgeFault, clearFault, triggerFocusAnimation, setFocusedFaultId, addFault } = useDamStore();
   const [expandedFault, setExpandedFault] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newFaultType, setNewFaultType] = useState<FaultType>('overload');

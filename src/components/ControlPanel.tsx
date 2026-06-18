@@ -1,5 +1,5 @@
 import { useDamStore, OperationMode } from '@/store/useDamStore';
-import { Play, Pause, Settings, Eye, EyeOff, Zap, Wrench, Waves, AlertTriangle } from 'lucide-react';
+import { Play, Settings, Eye, EyeOff, Zap, Wrench, Waves, AlertTriangle } from 'lucide-react';
 
 const modes: { key: OperationMode; label: string; icon: typeof Zap; color: string }[] = [
   { key: 'normal', label: '常规运行', icon: Play, color: 'bg-green-500' },

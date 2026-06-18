@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { useDamStore, GateData, OperationMode, FaultInfo, FaultType } from '@/store/useDamStore';
+import { useDamStore, GateData, FaultInfo, FaultType } from '@/store/useDamStore';
 
 interface GateMeshData {
   group: THREE.Group;
@@ -499,7 +499,7 @@ export class DamScene {
       rightFrame.castShadow = true;
       gateGroup.add(rightFrame);
 
-      const hoistGroup = this.createHoist(gate.id);
+      const hoistGroup = this.createHoist();
       hoistGroup.position.set(0, 75, 0);
       gateGroup.add(hoistGroup);
 
@@ -560,7 +560,7 @@ export class DamScene {
     });
   }
 
-  private createHoist(gateId: string): THREE.Group {
+  private createHoist(): THREE.Group {
     const hoistGroup = new THREE.Group();
     hoistGroup.name = 'hoist';
 
@@ -1114,14 +1114,12 @@ export class DamScene {
     const flowMultiplier = state.operationMode === 'flood' || state.operationMode === 'emergency' ? 3 : 1;
 
     for (let i = 0; i < positions.count; i++) {
-      const i3 = i * 3;
-
       let x = positions.getX(i);
       let y = positions.getY(i);
       let z = positions.getZ(i);
 
       const vx = velocities.getX(i);
-      let vy = velocities.getY(i);
+      const vy = velocities.getY(i);
       const vz = velocities.getZ(i);
 
       x += vx * flowMultiplier;
@@ -1160,7 +1158,6 @@ export class DamScene {
 
       for (let i = 0; i < positions.count; i++) {
         const x = positions.getX(i);
-        const z = positions.getZ(i);
         const wave = Math.sin(x * 0.1 + time) * 2;
         positions.setY(i, 30 + wave);
         positions.setZ(i, 100 + wave * 0.5);

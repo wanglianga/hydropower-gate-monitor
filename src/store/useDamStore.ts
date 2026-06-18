@@ -516,7 +516,6 @@ export const useDamStore = create<DamState>((set, get) => ({
   },
 
   calculatePredictedDownstreamLevel: () => {
-    const state = get();
     const totalDischarge = get().calculateTotalEstimatedDischarge();
     const baseLevel = 30;
     const levelPerDischarge = 0.008;
