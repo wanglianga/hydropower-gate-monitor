@@ -4,6 +4,24 @@ export type OperationMode = 'normal' | 'maintenance' | 'flood' | 'emergency';
 export type FaultType = 'overload' | 'brake' | 'limit' | 'communication';
 export type InterlockCheckResult = 'pass' | 'fail' | 'pending';
 export type DispatchBatchStatus = 'waiting' | 'executing' | 'completed';
+export type AlarmSeverity = 'red' | 'orange' | 'yellow';
+export type AlarmCategory = 'waterLevel' | 'gateDeviation' | 'hoistLoad' | 'communication';
+
+export interface AlarmInfo {
+  id: string;
+  severity: AlarmSeverity;
+  category: AlarmCategory;
+  gateId?: string;
+  position: { x: number; y: number; z: number };
+  currentValue: number;
+  threshold: number;
+  unit: string;
+  triggerTime: string;
+  suggestedAction: string;
+  relatedDeviceIds: string[];
+  resolved: boolean;
+  priority: number;
+}
 
 export interface DispatchBatch {
   id: string;
@@ -94,6 +112,9 @@ interface DamState {
   focusedFaultId: string | null;
   focusPathProgress: number;
   isFocusAnimating: boolean;
+  gradedAlarms: AlarmInfo[];
+  alarmOverviewMode: boolean;
+  selectedAlarmId: string | null;
 
   setOperationMode: (mode: OperationMode) => void;
   setSelectedGateId: (id: string | null) => void;
@@ -116,6 +137,11 @@ interface DamState {
   calculateEstimatedDischarge: (gateId: string, opening: number) => number;
   calculateTotalEstimatedDischarge: () => number;
   calculatePredictedDownstreamLevel: () => number;
+  addGradedAlarm: (alarm: Omit<AlarmInfo, 'id' | 'triggerTime' | 'resolved' | 'priority'>) => void;
+  resolveGradedAlarm: (alarmId: string) => void;
+  setSelectedAlarmId: (alarmId: string | null) => void;
+  recalculateAlarmPriorities: () => void;
+  checkAlarmConditions: () => void;
 }
 
 const generateInitialGates = (): GateData[] => {
@@ -242,6 +268,9 @@ export const useDamStore = create<DamState>((set, get) => ({
   focusedFaultId: null,
   focusPathProgress: 0,
   isFocusAnimating: false,
+  gradedAlarms: [],
+  alarmOverviewMode: false,
+  selectedAlarmId: null,
 
   setOperationMode: (mode) => {
     set({ operationMode: mode });
@@ -363,6 +392,10 @@ export const useDamStore = create<DamState>((set, get) => ({
     }
 
     const predictedLevel = get().calculatePredictedDownstreamLevel();
+
+    if (Math.random() < 0.02 * deltaTime) {
+      get().checkAlarmConditions();
+    }
 
     set({
       gates: newGates,
@@ -520,5 +553,134 @@ export const useDamStore = create<DamState>((set, get) => ({
     const baseLevel = 30;
     const levelPerDischarge = 0.008;
     return Math.min(60, baseLevel + totalDischarge * levelPerDischarge);
+  },
+
+  addGradedAlarm: (alarm) => {
+    const newAlarm: AlarmInfo = {
+      ...alarm,
+      id: `ga-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      triggerTime: new Date().toLocaleString('zh-CN'),
+      resolved: false,
+      priority: alarm.severity === 'red' ? 100 : alarm.severity === 'orange' ? 50 : 10
+    };
+    set(state => {
+      const updated = [...state.gradedAlarms, newAlarm];
+      const overview = updated.filter(a => !a.resolved).length > 1;
+      return { gradedAlarms: updated, alarmOverviewMode: overview };
+    });
+  },
+
+  resolveGradedAlarm: (alarmId) => {
+    set(state => {
+      const updated = state.gradedAlarms.map(a =>
+        a.id === alarmId ? { ...a, resolved: true } : a
+      );
+      const activeAlarms = updated.filter(a => !a.resolved);
+      const overview = activeAlarms.length > 1;
+      const selectedId = state.selectedAlarmId === alarmId ? null : state.selectedAlarmId;
+      return { gradedAlarms: updated, alarmOverviewMode: overview, selectedAlarmId: selectedId };
+    });
+    get().recalculateAlarmPriorities();
+  },
+
+  setSelectedAlarmId: (alarmId) => set({ selectedAlarmId: alarmId }),
+
+  recalculateAlarmPriorities: () => {
+    set(state => {
+      const activeAlarms = state.gradedAlarms
+        .filter(a => !a.resolved)
+        .sort((a, b) => {
+          const sevOrder = { red: 0, orange: 1, yellow: 2 };
+          const sevDiff = sevOrder[a.severity] - sevOrder[b.severity];
+          if (sevDiff !== 0) return sevDiff;
+          return b.triggerTime.localeCompare(a.triggerTime);
+        });
+      const updated = [...state.gradedAlarms];
+      activeAlarms.forEach((alarm, idx) => {
+        const i = updated.findIndex(a => a.id === alarm.id);
+        if (i >= 0) {
+          updated[i] = { ...updated[i], priority: (activeAlarms.length - idx) * 10 };
+        }
+      });
+      return { gradedAlarms: updated };
+    });
+  },
+
+  checkAlarmConditions: () => {
+    const state = get();
+    const gates = state.gates;
+
+    gates.forEach(gate => {
+      const existingWaterAlarm = state.gradedAlarms.find(
+        a => !a.resolved && a.category === 'waterLevel' && a.gateId === gate.id
+      );
+      if (gate.upstreamWaterLevel > 90 && !existingWaterAlarm) {
+        get().addGradedAlarm({
+          severity: gate.upstreamWaterLevel > 95 ? 'red' : 'orange',
+          category: 'waterLevel',
+          gateId: gate.id,
+          position: { x: gate.position.x, y: 78, z: -15 },
+          currentValue: gate.upstreamWaterLevel,
+          threshold: 90,
+          unit: 'm',
+          suggestedAction: '立即增大泄量，开启更多闸门泄洪',
+          relatedDeviceIds: gates.filter(g => g.id !== gate.id).map(g => g.id)
+        });
+      }
+
+      const existingDeviationAlarm = state.gradedAlarms.find(
+        a => !a.resolved && a.category === 'gateDeviation' && a.gateId === gate.id
+      );
+      const deviation = Math.abs(gate.opening - gate.targetOpening);
+      if (deviation > 15 && !existingDeviationAlarm) {
+        get().addGradedAlarm({
+          severity: deviation > 25 ? 'red' : deviation > 20 ? 'orange' : 'yellow',
+          category: 'gateDeviation',
+          gateId: gate.id,
+          position: { x: gate.position.x, y: 40, z: 0 },
+          currentValue: gate.opening,
+          threshold: gate.targetOpening,
+          unit: '%',
+          suggestedAction: '检查启闭机运行状态，确认是否存在卡阻',
+          relatedDeviceIds: [gate.id]
+        });
+      }
+
+      const existingLoadAlarm = state.gradedAlarms.find(
+        a => !a.resolved && a.category === 'hoistLoad' && a.gateId === gate.id
+      );
+      if (gate.load > gate.maxLoad * 0.85 && !existingLoadAlarm) {
+        const loadRatio = gate.load / gate.maxLoad;
+        get().addGradedAlarm({
+          severity: loadRatio > 0.95 ? 'red' : loadRatio > 0.9 ? 'orange' : 'yellow',
+          category: 'hoistLoad',
+          gateId: gate.id,
+          position: { x: gate.position.x, y: 82, z: 8 },
+          currentValue: gate.load,
+          threshold: gate.maxLoad * 0.85,
+          unit: 't',
+          suggestedAction: '降低闸门开度或暂停操作，排查负载来源',
+          relatedDeviceIds: [gate.id]
+        });
+      }
+
+      const existingCommAlarm = state.gradedAlarms.find(
+        a => !a.resolved && a.category === 'communication' && a.gateId === gate.id
+      );
+      const hasCommFault = gate.faults.some(f => f.type === 'communication' && !f.acknowledged);
+      if (hasCommFault && !existingCommAlarm) {
+        get().addGradedAlarm({
+          severity: 'orange',
+          category: 'communication',
+          gateId: gate.id,
+          position: { x: gate.position.x, y: 85, z: 8 },
+          currentValue: 0,
+          threshold: 1,
+          unit: '连接',
+          suggestedAction: '检查通信链路，切换备用通道',
+          relatedDeviceIds: [gate.id]
+        });
+      }
+    });
   }
 }));

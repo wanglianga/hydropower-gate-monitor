@@ -4,14 +4,16 @@ import { DamScene } from '@/scene/DamScene';
 interface SceneCanvasProps {
   onGateClick: (gateId: string) => void;
   onFaultClick: (faultId: string) => void;
+  onAlarmClick: (alarmId: string) => void;
 }
 
 export interface SceneCanvasRef {
   focusOnFault: (faultId: string) => void;
   clearFaultFocus: () => void;
+  focusOnAlarm: (alarmId: string) => void;
 }
 
-const SceneCanvas = forwardRef<SceneCanvasRef, SceneCanvasProps>(({ onGateClick, onFaultClick }, ref) => {
+const SceneCanvas = forwardRef<SceneCanvasRef, SceneCanvasProps>(({ onGateClick, onFaultClick, onAlarmClick }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<DamScene | null>(null);
 
@@ -25,13 +27,18 @@ const SceneCanvas = forwardRef<SceneCanvasRef, SceneCanvasProps>(({ onGateClick,
       if (sceneRef.current) {
         sceneRef.current.clearFaultFocus();
       }
+    },
+    focusOnAlarm: (alarmId: string) => {
+      if (sceneRef.current) {
+        sceneRef.current.focusOnAlarm(alarmId);
+      }
     }
   }));
 
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const scene = new DamScene(containerRef.current, onGateClick, onFaultClick);
+    const scene = new DamScene(containerRef.current, onGateClick, onFaultClick, onAlarmClick);
     sceneRef.current = scene;
     scene.start();
 
@@ -39,7 +46,7 @@ const SceneCanvas = forwardRef<SceneCanvasRef, SceneCanvasProps>(({ onGateClick,
       scene.dispose();
       sceneRef.current = null;
     };
-  }, [onGateClick, onFaultClick]);
+  }, [onGateClick, onFaultClick, onAlarmClick]);
 
   return (
     <div

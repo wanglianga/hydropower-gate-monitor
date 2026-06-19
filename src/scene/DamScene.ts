@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { useDamStore, GateData, FaultInfo, FaultType } from '@/store/useDamStore';
+import { useDamStore, GateData, FaultInfo, FaultType, AlarmInfo, AlarmSeverity } from '@/store/useDamStore';
 
 interface GateMeshData {
   group: THREE.Group;
@@ -15,6 +15,23 @@ interface FocusPathData {
   line: THREE.Line;
   marker: THREE.Mesh;
   points: THREE.Vector3[];
+}
+
+interface AlarmLabelData {
+  alarmId: string;
+  group: THREE.Group;
+  labelSprite: THREE.Sprite;
+  pulseRing: THREE.Mesh;
+  pathLine: THREE.Line | null;
+}
+
+interface CameraAnimation {
+  targetPosition: THREE.Vector3;
+  targetLookAt: THREE.Vector3;
+  startPosition: THREE.Vector3;
+  startLookAt: THREE.Vector3;
+  progress: number;
+  duration: number;
 }
 
 export class DamScene {
@@ -44,8 +61,15 @@ export class DamScene {
   private gateMeshes: Map<string, GateMeshData> = new Map();
   private interactiveObjects: THREE.Object3D[] = [];
 
+  private alarmLabels: Map<string, AlarmLabelData> = new Map();
+  private alarmLabelsGroup: THREE.Group;
+  private cameraAnimation: CameraAnimation | null = null;
+  private overviewModeActive: boolean = false;
+  private overviewPulseTime: number = 0;
+
   private onGateClick: (gateId: string) => void;
   private onFaultClick: (faultId: string) => void;
+  private onAlarmClick: (alarmId: string) => void;
 
   private batchColors: Record<string, THREE.Color> = {
     'batch-1': new THREE.Color(0x22c55e),
@@ -54,10 +78,11 @@ export class DamScene {
   };
   private defaultBatchColor = new THREE.Color(0x6b7280);
 
-  constructor(container: HTMLElement, onGateClick: (gateId: string) => void, onFaultClick: (faultId: string) => void) {
+  constructor(container: HTMLElement, onGateClick: (gateId: string) => void, onFaultClick: (faultId: string) => void, onAlarmClick: (alarmId: string) => void) {
     this.container = container;
     this.onGateClick = onGateClick;
     this.onFaultClick = onFaultClick;
+    this.onAlarmClick = onAlarmClick;
     this.clock = new THREE.Clock();
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
@@ -97,12 +122,14 @@ export class DamScene {
     this.spillwayGroup = new THREE.Group();
     this.labelsGroup = new THREE.Group();
     this.faultGroup = new THREE.Group();
+    this.alarmLabelsGroup = new THREE.Group();
 
     this.scene.add(this.damGroup);
     this.scene.add(this.gatesGroup);
     this.scene.add(this.spillwayGroup);
     this.scene.add(this.labelsGroup);
     this.scene.add(this.faultGroup);
+    this.scene.add(this.alarmLabelsGroup);
 
     this.setupLights();
     this.createDam();
@@ -923,6 +950,22 @@ export class DamScene {
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
 
+    const alarmObjects: THREE.Object3D[] = [];
+    this.alarmLabels.forEach((labelData) => {
+      alarmObjects.push(labelData.group);
+    });
+    const alarmIntersects = this.raycaster.intersectObjects(alarmObjects, true);
+    if (alarmIntersects.length > 0) {
+      let object: THREE.Object3D | null = alarmIntersects[0].object;
+      while (object && !object.userData.alarmId) {
+        object = object.parent;
+      }
+      if (object && object.userData.alarmId) {
+        this.onAlarmClick(object.userData.alarmId);
+        return;
+      }
+    }
+
     const faultObjects: THREE.Object3D[] = [];
     this.gateMeshes.forEach((data) => {
       data.faultMarkers.forEach((marker) => {
@@ -970,7 +1013,13 @@ export class DamScene {
     });
     const faultIntersects = this.raycaster.intersectObjects(faultObjects, true);
 
-    document.body.style.cursor = (intersects.length > 0 || faultIntersects.length > 0) ? 'pointer' : 'default';
+    const alarmObjects: THREE.Object3D[] = [];
+    this.alarmLabels.forEach((labelData) => {
+      alarmObjects.push(labelData.group);
+    });
+    const alarmIntersects = this.raycaster.intersectObjects(alarmObjects, true);
+
+    document.body.style.cursor = (intersects.length > 0 || faultIntersects.length > 0 || alarmIntersects.length > 0) ? 'pointer' : 'default';
   };
 
   public update(): void {
@@ -1052,6 +1101,7 @@ export class DamScene {
     this.updateWaterParticles();
     this.updateSensorLights();
     this.updateWarningLine();
+    this.updateAlarmLabels();
 
     if (state.isFocusAnimating && this.focusPath) {
       this.updateFocusPath(state.focusPathProgress);
@@ -1187,6 +1237,247 @@ export class DamScene {
     }
   }
 
+  private getAlarmSeverityColor(severity: AlarmSeverity): number {
+    switch (severity) {
+      case 'red': return 0xff2222;
+      case 'orange': return 0xff8800;
+      case 'yellow': return 0xffcc00;
+    }
+  }
+
+  private getAlarmSeverityBgColor(severity: AlarmSeverity): string {
+    switch (severity) {
+      case 'red': return 'rgba(220, 38, 38, 0.95)';
+      case 'orange': return 'rgba(234, 88, 12, 0.95)';
+      case 'yellow': return 'rgba(202, 138, 4, 0.95)';
+    }
+  }
+
+  private getAlarmCategoryLabel(category: string): string {
+    switch (category) {
+      case 'waterLevel': return '水位超限';
+      case 'gateDeviation': return '开度偏差';
+      case 'hoistLoad': return '负载异常';
+      case 'communication': return '通信中断';
+      default: return '异常';
+    }
+  }
+
+  private createAlarmLabel(alarm: AlarmInfo): THREE.Group {
+    const group = new THREE.Group();
+    group.userData = { alarmId: alarm.id, isAlarm: true };
+    group.position.set(alarm.position.x, alarm.position.y, alarm.position.z);
+
+    const color = this.getAlarmSeverityColor(alarm.severity);
+
+    const markerGeo = new THREE.OctahedronGeometry(1.2, 0);
+    const markerMat = new THREE.MeshStandardMaterial({
+      color: color,
+      emissive: color,
+      emissiveIntensity: 0.8,
+      transparent: true,
+      opacity: 0.9
+    });
+    const marker = new THREE.Mesh(markerGeo, markerMat);
+    marker.position.y = 5;
+    marker.name = 'alarmMarker';
+    group.add(marker);
+
+    const ringGeo = new THREE.RingGeometry(1.8, 2.4, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.DoubleSide
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 5;
+    ring.name = 'alarmPulseRing';
+    group.add(ring);
+
+    const lineMat = new THREE.LineBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 0.4
+    });
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 5, 0)
+    ]);
+    const stemLine = new THREE.Line(lineGeo, lineMat);
+    group.add(stemLine);
+
+    const bgColor = this.getAlarmSeverityBgColor(alarm.severity);
+    const catLabel = this.getAlarmCategoryLabel(alarm.category);
+    const labelText = `${catLabel}\n${alarm.currentValue.toFixed(1)}${alarm.unit}`;
+    const texture = this.createTextTexture(labelText, bgColor, '#ffffff', 20);
+
+    const labelMat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false
+    });
+    const labelSprite = new THREE.Sprite(labelMat);
+    labelSprite.scale.set(7, 3.5, 1);
+    labelSprite.position.y = 9;
+    labelSprite.name = 'alarmLabel';
+    group.add(labelSprite);
+
+    return group;
+  }
+
+  private createNearestPathLine(alarm: AlarmInfo, cameraPosition: THREE.Vector3): THREE.Line | null {
+    const alarmPos = new THREE.Vector3(alarm.position.x, alarm.position.y, alarm.position.z);
+    const damTopPoint = new THREE.Vector3(alarm.position.x, 78, 8);
+    const pathPoints: THREE.Vector3[] = [
+      new THREE.Vector3(cameraPosition.x, Math.min(cameraPosition.y, 78), cameraPosition.z + 10),
+      damTopPoint,
+      alarmPos
+    ];
+
+    const curve = new THREE.CatmullRomCurve3(pathPoints);
+    const curvePoints = curve.getPoints(30);
+    const geometry = new THREE.BufferGeometry().setFromPoints(curvePoints);
+
+    const color = this.getAlarmSeverityColor(alarm.severity);
+    const material = new THREE.LineDashedMaterial({
+      color: color,
+      dashSize: 2,
+      gapSize: 1,
+      transparent: true,
+      opacity: 0.6
+    });
+
+    const line = new THREE.Line(geometry, material);
+    line.computeLineDistances();
+    return line;
+  }
+
+  private updateAlarmLabels(): void {
+    const state = useDamStore.getState();
+    const activeAlarms = state.gradedAlarms.filter(a => !a.resolved);
+    const activeAlarmIds = new Set(activeAlarms.map(a => a.id));
+
+    this.alarmLabels.forEach((labelData, alarmId) => {
+      if (!activeAlarmIds.has(alarmId)) {
+        this.alarmLabelsGroup.remove(labelData.group);
+        if (labelData.pathLine) {
+          this.alarmLabelsGroup.remove(labelData.pathLine);
+        }
+        this.alarmLabels.delete(alarmId);
+      }
+    });
+
+    const camPos = this.camera.position.clone();
+
+    activeAlarms.forEach(alarm => {
+      if (!this.alarmLabels.has(alarm.id)) {
+        const group = this.createAlarmLabel(alarm);
+        const labelSprite = group.children.find(c => c.name === 'alarmLabel') as THREE.Sprite;
+        const pulseRing = group.children.find(c => c.name === 'alarmPulseRing') as THREE.Mesh;
+
+        let pathLine: THREE.Line | null = null;
+        if (state.alarmOverviewMode) {
+          pathLine = this.createNearestPathLine(alarm, camPos);
+          if (pathLine) {
+            this.alarmLabelsGroup.add(pathLine);
+          }
+        }
+
+        this.alarmLabelsGroup.add(group);
+        this.alarmLabels.set(alarm.id, {
+          alarmId: alarm.id,
+          group,
+          labelSprite,
+          pulseRing,
+          pathLine
+        });
+      } else {
+        const labelData = this.alarmLabels.get(alarm.id)!;
+        const marker = labelData.group.children.find(c => c.name === 'alarmMarker');
+        if (marker) {
+          const time = Date.now() * 0.003;
+          marker.rotation.y = time + alarm.id.length;
+          const pulse = 0.8 + Math.sin(time * 2) * 0.2;
+          const mat = (marker as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          mat.emissiveIntensity = pulse;
+        }
+
+        const pulseRing = labelData.group.children.find(c => c.name === 'alarmPulseRing');
+        if (pulseRing) {
+          const scale = 1 + Math.sin(Date.now() * 0.004 + alarm.id.charCodeAt(0)) * 0.3;
+          pulseRing.scale.set(scale, scale, 1);
+        }
+
+        if (state.alarmOverviewMode) {
+          if (!labelData.pathLine) {
+            const pathLine = this.createNearestPathLine(alarm, camPos);
+            if (pathLine) {
+              this.alarmLabelsGroup.add(pathLine);
+              labelData.pathLine = pathLine;
+            }
+          }
+        } else {
+          if (labelData.pathLine) {
+            this.alarmLabelsGroup.remove(labelData.pathLine);
+            labelData.pathLine = null;
+          }
+        }
+      }
+    });
+
+    if (state.alarmOverviewMode !== this.overviewModeActive) {
+      this.overviewModeActive = state.alarmOverviewMode;
+    }
+  }
+
+  public focusOnAlarm(alarmId: string): void {
+    const state = useDamStore.getState();
+    const alarm = state.gradedAlarms.find(a => a.id === alarmId);
+    if (!alarm) return;
+
+    const targetPos = new THREE.Vector3(alarm.position.x, alarm.position.y, alarm.position.z);
+    const distance = 40;
+    const cameraTarget = new THREE.Vector3(
+      targetPos.x + distance * 0.5,
+      targetPos.y + distance * 0.3,
+      targetPos.z + distance * 0.7
+    );
+    const lookAtTarget = targetPos.clone();
+
+    this.cameraAnimation = {
+      targetPosition: cameraTarget,
+      targetLookAt: lookAtTarget,
+      startPosition: this.camera.position.clone(),
+      startLookAt: this.controls.target.clone(),
+      progress: 0,
+      duration: 1.5
+    };
+  }
+
+  private updateCameraAnimation(delta: number): void {
+    if (!this.cameraAnimation) return;
+
+    const anim = this.cameraAnimation;
+    anim.progress += delta / anim.duration;
+
+    if (anim.progress >= 1) {
+      this.camera.position.copy(anim.targetPosition);
+      this.controls.target.copy(anim.targetLookAt);
+      this.cameraAnimation = null;
+      return;
+    }
+
+    const t = this.easeInOutCubic(anim.progress);
+    this.camera.position.lerpVectors(anim.startPosition, anim.targetPosition, t);
+    this.controls.target.lerpVectors(anim.startLookAt, anim.targetLookAt, t);
+  }
+
+  private easeInOutCubic(t: number): number {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
   public clearFaultFocus(): void {
     this.clearFocusPath();
   }
@@ -1197,6 +1488,7 @@ export class DamScene {
     const delta = this.clock.getDelta();
     useDamStore.getState().tick(delta);
 
+    this.updateCameraAnimation(delta);
     this.update();
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
